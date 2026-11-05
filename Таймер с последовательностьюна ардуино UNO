@@ -1,0 +1,461 @@
+boolean COMMON_CATHODE = true;
+
+// ---------- СЕГМЕНТЫ ----------
+int SEG_A  = 2;
+int SEG_B  = 3;
+int SEG_C  = 4;
+int SEG_D  = 5;
+int SEG_E  = 6;
+int SEG_F  = 7;
+int SEG_G  = 8;
+int SEG_DP = 9;
+
+// ---------- РАЗРЯДЫ ----------
+int DIG_1 = 10;
+int DIG_2 = 11;
+int DIG_3 = 12;
+int DIG_4 = 13;
+
+// ---------- КНОПКИ ----------
+int PIN_BTN_A = A0;
+int PIN_BTN_B = A3;
+int PIN_BTN_C = A5;
+
+// ---------- ЗУММЕР ----------
+int BUZZER = A4;
+
+// ---------- ПОРОГИ ADC A0 (подтяжка 1кΩ) ----------
+int A_UP5_MIN    = 50;   int A_UP5_MAX    = 150;
+int A_DOWN5_MIN  = 155;  int A_DOWN5_MAX  = 245;
+int A_DOWN60_MIN = 850;  int A_DOWN60_MAX = 980;
+
+// ---------- ПОРОГИ ADC A3 (подтяжка 10кΩ) ----------
+int B_UP60_MIN   = 30;   int B_UP60_MAX   = 140;
+int B_START_MIN  = 145;  int B_START_MAX  = 280;
+int B_RESET_MIN  = 600;  int B_RESET_MAX  = 920;
+
+// ---------- ПОРОГИ ADC A5 (подтяжка 10кΩ) ----------
+int C_NEXT_MIN   = 30;   int C_NEXT_MAX   = 140;
+
+// ---------- ОЧЕРЕДЬ ТАЙМЕРОВ ----------
+int MAX_QUEUE = 10;                    
+int queue[10];                         
+int queueCount = 0;                    
+int currentIndex = 0;                  
+int setSeconds = 0;                    
+int remainingSeconds = 0;              
+
+// ---------- ПАРАМЕТРЫ ----------
+int STEP_SECONDS = 5;
+int STEP_MINUTES = 60;
+int MAX_SECONDS  = 99 * 60;
+int MIN_SECONDS  = 0;
+int beepThreshold = 10;
+
+// ---------- СОСТОЯНИЕ ----------
+boolean running  = false;
+boolean finished = false;
+
+unsigned long lastTick     = 0;
+unsigned long lastBlink    = 0;
+unsigned long lastBeep     = 0;
+unsigned long endBeepStart = 0;
+int endBeepCount = 0;
+boolean blinkState = false;
+
+int currentDigit = 0;
+
+// ==================================================
+//  ПРОТОТИПЫ
+// ==================================================
+int  readButtonA();
+int  readButtonB();
+int  readButtonC();
+void handleButtons(int btn);
+void handleTimer();
+void handleBeep();
+void refreshDisplay();
+void showDigit(int digit, boolean dot);
+void writeSegment(int pin, boolean on);
+void setDigit(int n);
+void allDigitsOff();
+
+// ==================================================
+//  SETUP
+// ==================================================
+void setup() {
+  pinMode(SEG_A,  OUTPUT);
+  pinMode(SEG_B,  OUTPUT);
+  pinMode(SEG_C,  OUTPUT);
+  pinMode(SEG_D,  OUTPUT);
+  pinMode(SEG_E,  OUTPUT);
+  pinMode(SEG_F,  OUTPUT);
+  pinMode(SEG_G,  OUTPUT);
+  pinMode(SEG_DP, OUTPUT);
+
+  pinMode(DIG_1, OUTPUT);
+  pinMode(DIG_2, OUTPUT);
+  pinMode(DIG_3, OUTPUT);
+  pinMode(DIG_4, OUTPUT);
+
+  pinMode(PIN_BTN_A, INPUT);
+  pinMode(PIN_BTN_B, INPUT);
+  pinMode(PIN_BTN_C, INPUT);
+
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
+
+  allDigitsOff();
+
+  queueCount = 0;
+  currentIndex = 0;
+  setSeconds = 0;
+  remainingSeconds = 0;
+}
+
+// ==================================================
+//  LOOP
+// ==================================================
+void loop() {
+  int btnA = readButtonA();
+  int btnB = readButtonB();
+  int btnC = readButtonC();
+
+  int btn = 0;
+  if (btnB != 0) btn = btnB;
+  else if (btnA != 0) btn = btnA;
+  else if (btnC != 0) btn = btnC;
+
+  handleButtons(btn);
+  handleTimer();
+  handleBeep();
+  refreshDisplay();
+}
+
+// ==================================================
+//  Читаем A0 — +5 сек, −5 сек, −1 мин
+// ==================================================
+int readButtonA() {
+  int val = analogRead(PIN_BTN_A);
+
+  if (val >= A_UP5_MIN    && val <= A_UP5_MAX)    return 1;
+  if (val >= A_DOWN5_MIN  && val <= A_DOWN5_MAX)  return 2;
+  if (val >= A_DOWN60_MIN && val <= A_DOWN60_MAX) return 4;
+
+  return 0;
+}
+
+// ==================================================
+//  Читаем A3 — +1 мин, СТАРТ, Сброс
+// ==================================================
+int readButtonB() {
+  int val = analogRead(PIN_BTN_B);
+
+  if (val >= B_UP60_MIN   && val <= B_UP60_MAX)   return 3;
+  if (val >= B_START_MIN  && val <= B_START_MAX)  return 5;
+  if (val >= B_RESET_MIN  && val <= B_RESET_MAX)  return 6;
+
+  return 0;
+}
+
+// ==================================================
+//  Читаем A5 — следующий таймер
+// ==================================================
+int readButtonC() {
+  int val = analogRead(PIN_BTN_C);
+
+  if (val >= C_NEXT_MIN && val <= C_NEXT_MAX) return 7;
+
+  return 0;
+}
+
+// ==================================================
+//  ОБРАБОТКА КНОПОК
+// ==================================================
+void handleButtons(int btn) {
+  static int prevBtn = 0;
+  static unsigned long lastPress = 0;
+
+  if (btn == 0) {
+    prevBtn = 0;
+    return;
+  }
+
+  if (btn == prevBtn && millis() - lastPress < 300) return;
+
+  prevBtn   = btn;
+  lastPress = millis();
+
+  boolean canEdit = (!running && !finished);
+
+  if (btn == 1 && canEdit) {
+    setSeconds = setSeconds + STEP_SECONDS;
+    if (setSeconds > MAX_SECONDS) setSeconds = MAX_SECONDS;
+  }
+  else if (btn == 2 && canEdit) {
+    setSeconds = setSeconds - STEP_SECONDS;
+    if (setSeconds < MIN_SECONDS) setSeconds = MIN_SECONDS;
+  }
+  else if (btn == 3 && canEdit) {
+    setSeconds = setSeconds + STEP_MINUTES;
+    if (setSeconds > MAX_SECONDS) setSeconds = MAX_SECONDS;
+  }
+  else if (btn == 4 && canEdit) {
+    setSeconds = setSeconds - STEP_MINUTES;
+    if (setSeconds < MIN_SECONDS) setSeconds = MIN_SECONDS;
+  }
+  else if (btn == 5) {
+    // СТАРТ — добавить текущую уставку и запустить очередь
+    if (!running && !finished) {
+      // если есть что добавить — добавляем
+      if (setSeconds > 0 && queueCount < MAX_QUEUE) {
+        queue[queueCount] = setSeconds;
+        queueCount = queueCount + 1;
+        setSeconds = 0;
+      }
+
+      // если в очереди что-то есть — стартуем
+      if (queueCount > 0) {
+        running = true;
+        finished = false;
+        currentIndex = 0;
+        remainingSeconds = queue[0];
+        lastTick = millis();
+        endBeepCount = 0;
+      }
+    }
+  }
+  else if (btn == 6) {
+    // Сброс — очистить всё
+    running  = false;
+    finished = false;
+    queueCount = 0;
+    currentIndex = 0;
+    setSeconds = 0;
+    remainingSeconds = 0;
+    endBeepCount = 0;
+    noTone(BUZZER);
+  }
+  else if (btn == 7) {
+    // СЛЕДУЮЩИЙ ТАЙМЕР — сохранить в очередь, обнулить для ввода
+    if (!running && !finished) {
+      if (setSeconds > 0 && queueCount < MAX_QUEUE) {
+        queue[queueCount] = setSeconds;
+        queueCount = queueCount + 1;
+        setSeconds = 0;
+        // подтверждение — короткий писк
+        tone(BUZZER, 1500, 80);
+      }
+    }
+  }
+}
+
+// ==================================================
+//  ОТСЧЁТ
+// ==================================================
+void handleTimer() {
+  if (!running) return;
+
+  if (millis() - lastTick >= 1000) {
+    lastTick = lastTick + 1000;
+
+    if (remainingSeconds > 0) {
+      remainingSeconds = remainingSeconds - 1;
+    }
+
+    if (remainingSeconds == 0) {
+      // Текущий таймер закончен — писк
+      endBeepStart = millis();
+      endBeepCount = 0;
+
+      // Переход к следующему
+      currentIndex = currentIndex + 1;
+      if (currentIndex < queueCount) {
+        remainingSeconds = queue[currentIndex];
+      } else {
+        // Очередь закончена
+        running = false;
+        finished = true;
+      }
+    }
+  }
+}
+
+// ==================================================
+//  ЗВУК
+// ==================================================
+void handleBeep() {
+  // Писк за N секунд до конца текущего таймера
+  if (running && beepThreshold > 0 && remainingSeconds <= beepThreshold && remainingSeconds > 0) {
+    if (millis() - lastBeep >= 1000) {
+      lastBeep = millis();
+      tone(BUZZER, 2000, 100);
+    }
+  }
+
+  // Писк в конце каждого таймера (3 гудка)
+  if (running || finished) {
+    if (endBeepCount < 3) {
+      if (millis() - endBeepStart >= 400) {
+        endBeepStart = millis();
+        endBeepCount = endBeepCount + 1;
+        if (endBeepCount <= 3) {
+          tone(BUZZER, 2500, 300);
+        }
+      }
+    }
+  }
+}
+
+// ==================================================
+//  ИНДИКАЦИЯ
+// ==================================================
+void refreshDisplay() {
+  int showSeconds;
+
+  if (running) {
+    showSeconds = remainingSeconds;
+  } else if (finished) {
+    showSeconds = 0;
+  } else {
+    showSeconds = setSeconds;
+  }
+
+  if (finished) {
+    if (millis() - lastBlink >= 500) {
+      lastBlink = millis();
+      blinkState = !blinkState;
+    }
+    if (blinkState == false) {
+      allDigitsOff();
+      delayMicroseconds(2000);
+      return;
+    }
+  }
+
+  int minutes = showSeconds / 60;
+  int seconds = showSeconds - minutes * 60;
+
+  int dM1 = minutes / 10;
+  int dM2 = minutes - dM1 * 10;
+  int dS1 = seconds / 10;
+  int dS2 = seconds - dS1 * 10;
+
+  allDigitsOff();
+
+  if (currentDigit == 0) {
+    setDigit(3);
+    showDigit(dM1, false);
+  }
+  else if (currentDigit == 1) {
+    setDigit(2);
+    boolean dot = true;
+    if (running) {
+      if ((millis() / 500) % 2 == 0) dot = true;
+      else dot = false;
+    }
+    showDigit(dM2, dot);
+  }
+  else if (currentDigit == 2) {
+    setDigit(1);
+    showDigit(dS1, false);
+  }
+  else {
+    setDigit(0);
+    showDigit(dS2, false);
+  }
+
+  currentDigit = currentDigit + 1;
+  if (currentDigit > 3) currentDigit = 0;
+
+  delayMicroseconds(2000);
+}
+
+// ==================================================
+//  ВЫВОД ЦИФРЫ
+// ==================================================
+void showDigit(int digit, boolean dot) {
+  boolean a = false, b = false, c = false, d = false;
+  boolean e = false, f = false, g = false;
+
+  if (digit == 0)      { a=true;  b=true;  c=true;  d=true;  e=true;  f=true;  g=false; }
+  else if (digit == 1) { a=false; b=true;  c=true;  d=false; e=false; f=false; g=false; }
+  else if (digit == 2) { a=true;  b=true;  c=false; d=true;  e=true;  f=false; g=true;  }
+  else if (digit == 3) { a=true;  b=true;  c=true;  d=true;  e=false; f=false; g=true;  }
+  else if (digit == 4) { a=false; b=true;  c=true;  d=false; e=false; f=true;  g=true;  }
+  else if (digit == 5) { a=true;  b=false; c=true;  d=true;  e=false; f=true;  g=true;  }
+  else if (digit == 6) { a=true;  b=false; c=true;  d=true;  e=true;  f=true;  g=true;  }
+  else if (digit == 7) { a=true;  b=true;  c=true;  d=false; e=false; f=false; g=false; }
+  else if (digit == 8) { a=true;  b=true;  c=true;  d=true;  e=true;  f=true;  g=true;  }
+  else if (digit == 9) { a=true;  b=true;  c=true;  d=true;  e=false; f=true;  g=true;  }
+
+  writeSegment(SEG_A, a);
+  writeSegment(SEG_B, b);
+  writeSegment(SEG_C, c);
+  writeSegment(SEG_D, d);
+  writeSegment(SEG_E, e);
+  writeSegment(SEG_F, f);
+  writeSegment(SEG_G, g);
+  writeSegment(SEG_DP, dot);
+}
+
+// ==================================================
+//  ЗАПИСЬ СЕГМЕНТА
+// ==================================================
+void writeSegment(int pin, boolean on) {
+  if (COMMON_CATHODE == true) {
+    if (on == true)  digitalWrite(pin, HIGH);
+    else             digitalWrite(pin, LOW);
+  } else {
+    if (on == true)  digitalWrite(pin, LOW);
+    else             digitalWrite(pin, HIGH);
+  }
+}
+
+// ==================================================
+//  ВЫБОР РАЗРЯДА
+// ==================================================
+void setDigit(int n) {
+  if (COMMON_CATHODE == true) {
+    if (n == 0) {
+      digitalWrite(DIG_1, LOW);  digitalWrite(DIG_2, HIGH);
+      digitalWrite(DIG_3, HIGH); digitalWrite(DIG_4, HIGH);
+    } else if (n == 1) {
+      digitalWrite(DIG_1, HIGH); digitalWrite(DIG_2, LOW);
+      digitalWrite(DIG_3, HIGH); digitalWrite(DIG_4, HIGH);
+    } else if (n == 2) {
+      digitalWrite(DIG_1, HIGH); digitalWrite(DIG_2, HIGH);
+      digitalWrite(DIG_3, LOW);  digitalWrite(DIG_4, HIGH);
+    } else {
+      digitalWrite(DIG_1, HIGH); digitalWrite(DIG_2, HIGH);
+      digitalWrite(DIG_3, HIGH); digitalWrite(DIG_4, LOW);
+    }
+  } else {
+    if (n == 0) {
+      digitalWrite(DIG_1, HIGH); digitalWrite(DIG_2, LOW);
+      digitalWrite(DIG_3, LOW);  digitalWrite(DIG_4, LOW);
+    } else if (n == 1) {
+      digitalWrite(DIG_1, LOW);  digitalWrite(DIG_2, HIGH);
+      digitalWrite(DIG_3, LOW);  digitalWrite(DIG_4, LOW);
+    } else if (n == 2) {
+      digitalWrite(DIG_1, LOW);  digitalWrite(DIG_2, LOW);
+      digitalWrite(DIG_3, HIGH); digitalWrite(DIG_4, LOW);
+    } else {
+      digitalWrite(DIG_1, LOW);  digitalWrite(DIG_2, LOW);
+      digitalWrite(DIG_3, LOW);  digitalWrite(DIG_4, HIGH);
+    }
+  }
+}
+
+// ==================================================
+//  ВЫКЛЮЧИТЬ ВСЕ РАЗРЯДЫ
+// ==================================================
+void allDigitsOff() {
+  if (COMMON_CATHODE == true) {
+    digitalWrite(DIG_1, HIGH); digitalWrite(DIG_2, HIGH);
+    digitalWrite(DIG_3, HIGH); digitalWrite(DIG_4, HIGH);
+  } else {
+    digitalWrite(DIG_1, LOW); digitalWrite(DIG_2, LOW);
+    digitalWrite(DIG_3, LOW); digitalWrite(DIG_4, LOW);
+  }
+}
